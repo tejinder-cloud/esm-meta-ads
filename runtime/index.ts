@@ -8,20 +8,24 @@ const { App } = bolt;
  * Runtime service for the ESM Overseas Meta Ads team.
  *
  * Listens to Slack (#esm-meta-ads, Socket Mode — no public URL needed) and
- * routes operator messages to the manager agent, which orchestrates the rest
- * of the team. This is the single process Railway deploys
- * (`npm run build` then `npm start`).
+ * routes operator messages to the manager agent. This is the single process
+ * Railway deploys (`npm run build` then `npm start`).
+ *
+ * For now the "manager" is a hello-world: it acknowledges the operator's
+ * message in plain English using the Claude Agent SDK (model claude-opus-4-8)
+ * with the ESM Overseas team context. Full delegation logic comes later.
  */
 
-/** The manager agent's role. It orchestrates the other nine agents. */
-const MANAGER_SYSTEM_PROMPT = `You are the Manager of the ESM Overseas Meta Ads team.
-You are the operator's single point of contact in Slack. Understand what the operator wants,
-delegate to the right specialist agents (media planner, competitive intel, creative strategist,
-image production, campaign builder, video production, tracking & data, analyst, optimizer), and
-report back clearly. Enforce the approval gates: stop and ask the operator before using generated
-images, before any budget/spend/scaling/kill decision, and do not start work without a brief.`;
+/**
+ * Minimal manager prompt — a connectivity/round-trip test, not the real
+ * delegation logic yet. The shared TEAM_CONTEXT (client, India/INR, gates) is
+ * prepended automatically by runAgent().
+ */
+const MANAGER_SYSTEM_PROMPT = `You are the Manager of the ESM Overseas Meta Ads team and the operator's point of contact in Slack.
+This is an early connectivity test, so do NOT do any real work or delegate to other agents yet.
+Simply acknowledge the operator's message in plain, friendly English in 1-2 sentences, confirming you received it and are connected. Keep it short.`;
 
-/** Print a clear, friendly message for missing secrets, then exit. */
+/** Print a clear, friendly message for missing required secrets, then exit. */
 function reportMissingSecrets(err: MissingEnvError): never {
   console.error("\n❌  Cannot start the ESM Meta Ads runtime — required secret(s) are not set:\n");
   for (const name of err.missing) {
@@ -54,27 +58,52 @@ async function main() {
     socketMode: true,
   });
 
-  // Respond when the operator mentions the bot in the channel.
-  app.event("app_mention", async ({ event, say }) => {
-    if (event.channel !== channelId) return;
+  // Identify ourselves so we can ignore our own messages (no self-reply loops).
+  const auth = await app.client.auth.test();
+  const botUserId = auth.user_id;
 
-    const text = (event.text ?? "").replace(/<@[^>]+>/g, "").trim();
-    if (!text) {
-      await say({ thread_ts: event.ts, text: "Hi — what would you like the team to work on?" });
+  /** Run the manager agent on the operator's text and reply in-thread. */
+  async function respond(
+    text: string,
+    threadTs: string,
+    say: (args: { thread_ts: string; text: string }) => Promise<unknown>,
+  ): Promise<void> {
+    const clean = text.trim();
+    if (!clean) {
+      await say({ thread_ts: threadTs, text: "Hi — what would you like the team to work on?" });
       return;
     }
-
     try {
-      const reply = await runAgent({ systemPrompt: MANAGER_SYSTEM_PROMPT, prompt: text });
-      await say({ thread_ts: event.ts, text: reply || "(no response)" });
+      const reply = await runAgent({ systemPrompt: MANAGER_SYSTEM_PROMPT, prompt: clean });
+      await say({ thread_ts: threadTs, text: reply || "(no response)" });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      await say({ thread_ts: event.ts, text: `⚠️ Something went wrong: ${message}` });
+      await say({ thread_ts: threadTs, text: `⚠️ Something went wrong: ${message}` });
     }
+  }
+
+  // Plain messages posted in the channel.
+  app.message(async ({ message, say }) => {
+    // Only handle ordinary user messages (no edits, joins, bot_message, etc.).
+    if (message.subtype !== undefined) return;
+    if (message.channel !== channelId) return;
+    // Ignore our own messages and any other bot's messages — prevents loops.
+    if (message.bot_id || message.user === botUserId) return;
+    // Mentions are handled by the app_mention listener; skip here to avoid a double reply.
+    if (botUserId && (message.text ?? "").includes(`<@${botUserId}>`)) return;
+    await respond(message.text ?? "", message.ts, say);
+  });
+
+  // Direct @mentions of the bot.
+  app.event("app_mention", async ({ event, say }) => {
+    if (event.channel !== channelId) return;
+    if (event.bot_id) return; // ignore mentions originating from a bot
+    const text = (event.text ?? "").replace(/<@[^>]+>/g, "").trim();
+    await respond(text, event.ts, say);
   });
 
   await app.start();
-  console.log(`✅ ESM Meta Ads runtime started. Listening on #esm-meta-ads (${channelId}).`);
+  console.log(`✅ ESM Meta Ads runtime started. Listening on #esm-meta-ads (${channelId}) as ${botUserId}.`);
 }
 
 main().catch((err) => {

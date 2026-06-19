@@ -41,6 +41,11 @@ export async function runAgent({
     options: {
       model: MODEL,
       systemPrompt: `${TEAM_CONTEXT}\n\n${systemPrompt}`,
+      // Keep replies pure text: no tools, single turn, and don't load any
+      // local settings/CLAUDE.md from disk. This is a server, not a coding agent.
+      allowedTools: [],
+      maxTurns: 1,
+      settingSources: [],
     },
   });
 
