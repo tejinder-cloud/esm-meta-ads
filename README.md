@@ -1,2 +1,1 @@
-# esm-meta-ads
-Entire meta ads team for ESM Overseas
+ESM Overseas — Meta Ads automation
