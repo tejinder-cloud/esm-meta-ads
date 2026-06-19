@@ -148,6 +148,21 @@ Railway builds from GitHub: it runs `npm run build` (`tsc` → `dist/`) then `np
 - **The Google Sheet is the shared memory** — agents write plans/data/reports there so the operator
   can read everything directly.
 
-> Note: `/agents/*` and the runtime wiring are scaffolding. The Claude Agent SDK and Slack Bolt
-> integration in `shared/agent.ts` and `runtime/index.ts` is structured and ready to extend; pin and
-> verify the installed `@anthropic-ai/claude-agent-sdk` version before relying on its message shapes.
+## Implementation status
+
+- **Manager** — implemented (hello-world acknowledgement + routing). Routes media-plan / budget /
+  forecast requests (or messages starting with `/plan`) to the Media Planner; everything else gets a
+  brief acknowledgement.
+- **Agent 1 — Media Planner** — implemented in `agents/media-planner/`. Gathers required inputs
+  (product, objective, budget, target CPR/ROAS, timeframe, landing page; India/INR), asking only for
+  what's missing; proposes a plan (test + scale phases with daily ₹ amounts) and a low–mid–high
+  forecast; then waits for the operator to reply **approve** or **change: …**. On approve it saves to
+  the Google Sheet (tab `media-plans`) if Sheets is configured, otherwise posts a self-contained
+  final plan plus a `✅ Media plan approved` record. It only proposes — never creates, spends, or
+  launches.
+- **Conversation state** — in-memory, keyed by Slack thread root (`runtime/index.ts`). A request
+  starts a thread; replies in that thread continue the same agent. (Not persisted across restarts.)
+- Agents 2–10 are still empty scaffolding.
+
+> Pin and verify the installed `@anthropic-ai/claude-agent-sdk` version before relying on its message
+> shapes. The Agent SDK is constrained to pure text replies (no tools, single turn) in `shared/agent.ts`.
