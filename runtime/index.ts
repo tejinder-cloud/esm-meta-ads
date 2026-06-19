@@ -1,5 +1,5 @@
 import bolt from "@slack/bolt";
-import { env, validateEnv, describeEnv, MissingEnvError } from "../shared/env.js";
+import { env, validateEnv, optionalFeatureStatus, describeEnv, MissingEnvError } from "../shared/env.js";
 import { runAgent } from "../shared/agent.js";
 
 const { App } = bolt;
@@ -35,8 +35,15 @@ function reportMissingSecrets(err: MissingEnvError): never {
 }
 
 async function main() {
-  // Fail fast with a friendly, complete list if any secret is missing.
+  // Fail fast with a friendly, complete list if any REQUIRED secret is missing
+  // (Anthropic + Slack — the secrets needed to run right now).
   validateEnv();
+
+  // Optional features (Meta, Google Sheets, Gemini) aren't wired up yet.
+  // If their secrets are missing, note it and start anyway — don't block.
+  for (const { feature } of optionalFeatureStatus()) {
+    console.log(`ℹ️  ${feature} is not yet configured — that feature is unavailable for now. (Set its secrets in .env / Railway to enable it.)`);
+  }
 
   const channelId = env.slackChannelId();
 
