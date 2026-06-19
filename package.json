@@ -1,0 +1,27 @@
+{
+  "name": "esm-meta-ads",
+  "version": "0.1.0",
+  "private": true,
+  "description": "ESM Overseas — 10-agent Meta Ads automation system (Claude Agent SDK + Slack, deployed on Railway).",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/runtime/index.js",
+    "dev": "tsx watch runtime/index.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.1.0",
+    "@slack/bolt": "^4.2.0",
+    "dotenv": "^16.4.5",
+    "googleapis": "^144.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  }
+}
