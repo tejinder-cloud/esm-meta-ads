@@ -7,6 +7,7 @@ import {
   isMediaPlanRequest,
   stripPlanCommand,
   runMediaPlanner,
+  decideOperatorIntent,
   saveApprovedPlan,
 } from "../agents/media-planner/index.js";
 
@@ -168,13 +169,29 @@ async function main() {
 
     // --- Continuing a Media Planner conversation ---
     if (existing.agent === "media-planner") {
-      // Approval gate: only meaningful once a plan has been proposed.
-      if (existing.phase === "proposed" && /^approve\b/i.test(operatorText)) {
-        await finalizeApproval(threadRoot, userId, existing.lastPlan ?? "(no plan on record)", say);
-        return;
+      // Approval gate only applies once a plan has been proposed.
+      if (existing.phase === "proposed") {
+        const decision = await decideOperatorIntent(operatorText);
+        if (decision === "approve") {
+          // Clean approval, no change instructions → lock it in.
+          await finalizeApproval(threadRoot, userId, existing.lastPlan ?? "(no plan on record)", say);
+          return;
+        }
+        if (decision === "ambiguous") {
+          // Don't guess and don't change anything — confirm intent.
+          await post(
+            say,
+            threadRoot,
+            "Just to confirm before I lock anything in: do you want to *approve this plan as-is*, or *make a change*?\nReply `approve` to lock it, or `change: …` with what you'd like adjusted.",
+          );
+          return;
+        }
+        // decision === "change": fall through to revise. Any change instruction —
+        // even if the message also said "approve" — revises and re-presents for
+        // approval. We never lock in the same turn that introduced changes.
       }
-      // Otherwise (gathering input, a "change: ..." request, or a clarification)
-      // → run the planner again with the new operator turn appended.
+      // Gathering input, or a change/clarification on a proposed plan →
+      // run the planner again with the new operator turn appended.
       await runPlannerTurn(existing, operatorText, threadRoot, say);
     }
   }

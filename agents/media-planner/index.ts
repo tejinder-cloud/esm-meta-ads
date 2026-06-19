@@ -34,6 +34,7 @@ BEHAVIOR:
   • An honest confidence note: early forecasts lean on India/category benchmarks, not this account's own history, so treat them as directional.
   • End the message by asking the operator to reply "approve" to lock it in, or "change: ..." to revise.
 - If the operator asks for a change, revise the plan and propose again (status "proposed").
+- When revising after a change request, apply ONLY the changes the operator explicitly asked for. Keep everything else exactly as it was. Never introduce changes the operator did not request.
 
 HARD RULES: You only propose. You never create campaigns, never spend, never launch. You have no tools and take no actions.
 
@@ -98,6 +99,66 @@ export async function runMediaPlanner(transcript: string): Promise<PlannerResult
     prompt: transcript,
   });
   return parsePlannerResult(raw);
+}
+
+// ---------------------------------------------------------------------------
+// Approval-gate decision: approve | change | ambiguous.
+//
+// The budget gate must be unambiguous. Any change instruction — even alongside
+// the word "approve" — counts as a REVISE, never an approval. Only a clean,
+// change-free approval locks the plan. When genuinely unclear, we ask.
+// ---------------------------------------------------------------------------
+
+export type OperatorDecision = "approve" | "change" | "ambiguous";
+
+const APPROVAL_CLASSIFIER_PROMPT = `You classify the operator's reply to a proposed media plan into exactly one decision.
+
+Decisions:
+- "approve": a clean, unconditional approval to lock the plan in, with NO requested changes of any kind.
+- "change": the reply requests ANY modification (budget, phases, daily amounts, targeting, dates, creative, structure, wording — anything), EVEN IF it also contains the word "approve" or otherwise signals approval. If both an approval and any change are present, the decision is "change".
+- "ambiguous": you cannot tell with confidence whether it is a clean approval or a change request (this includes questions and vague replies).
+
+Rules:
+- Any change instruction makes it "change", never "approve" — even alongside approval words.
+- Only a pure approval with zero requested changes is "approve".
+- When unsure, choose "ambiguous". Never guess "approve".
+
+Output ONLY a JSON object and nothing else: {"decision":"approve"|"change"|"ambiguous"}`;
+
+/** Deterministic fast paths; returns null when an LLM judgment is needed. */
+export function quickDecision(text: string): OperatorDecision | null {
+  const t = text.trim();
+  if (/^change\s*:/i.test(t)) return "change";
+  const norm = t.toLowerCase().replace(/[^a-z\s]/g, "").replace(/\s+/g, " ").trim();
+  const cleanApprovals = new Set([
+    "approve", "approved", "approve it", "approve this", "approve the plan",
+    "i approve", "approve please", "please approve", "yes approve", "approve yes",
+  ]);
+  if (cleanApprovals.has(norm)) return "approve";
+  return null;
+}
+
+function parseDecision(raw: string): OperatorDecision {
+  const m = raw.match(/"?decision"?\s*:\s*"(approve|change|ambiguous)"/i);
+  if (m) return m[1].toLowerCase() as OperatorDecision;
+  // Unparseable → ambiguous, so we ask rather than risk a wrong lock.
+  return "ambiguous";
+}
+
+/**
+ * Decide whether the operator's reply to a proposed plan is a clean approval, a
+ * change request, or ambiguous. Biases hard against false approvals: anything
+ * that isn't an unmistakable, change-free approval becomes "change" or
+ * "ambiguous". Never returns "approve" for a message that also requests changes.
+ */
+export async function decideOperatorIntent(operatorMessage: string): Promise<OperatorDecision> {
+  const quick = quickDecision(operatorMessage);
+  if (quick) return quick;
+  const raw = await runAgent({
+    systemPrompt: APPROVAL_CLASSIFIER_PROMPT,
+    prompt: `Operator reply to the proposed plan:\n${operatorMessage}`,
+  });
+  return parseDecision(raw);
 }
 
 const SHEET_TAB = "media-plans";
