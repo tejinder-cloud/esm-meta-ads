@@ -1,3 +1,4 @@
+import http from "node:http";
 import bolt from "@slack/bolt";
 import { env, validateEnv, optionalFeatureStatus, describeEnv, MissingEnvError } from "../shared/env.js";
 import { runAgent } from "../shared/agent.js";
@@ -25,6 +26,23 @@ const MANAGER_SYSTEM_PROMPT = `You are the Manager of the ESM Overseas Meta Ads 
 This is an early connectivity test, so do NOT do any real work or delegate to other agents yet.
 Simply acknowledge the operator's message in plain, friendly English in 1-2 sentences, confirming you received it and are connected. Keep it short.`;
 
+/**
+ * Tiny HTTP health endpoint. The real work runs over Slack Socket Mode (no web
+ * port), but Railway expects a service to bind the PORT it provides and respond
+ * to health checks. This returns 200 OK on any request so Railway sees the
+ * service as healthy, running alongside the Socket Mode connection.
+ */
+function startHealthServer(): void {
+  const port = Number(process.env.PORT) || 3000;
+  const server = http.createServer((_req, res) => {
+    res.writeHead(200, { "Content-Type": "text/plain" });
+    res.end("OK");
+  });
+  server.listen(port, () => {
+    console.log(`🩺 Health endpoint listening on :${port} (returns 200 OK).`);
+  });
+}
+
 /** Print a clear, friendly message for missing required secrets, then exit. */
 function reportMissingSecrets(err: MissingEnvError): never {
   console.error("\n❌  Cannot start the ESM Meta Ads runtime — required secret(s) are not set:\n");
@@ -48,6 +66,10 @@ async function main() {
   for (const { feature } of optionalFeatureStatus()) {
     console.log(`ℹ️  ${feature} is not yet configured — that feature is unavailable for now. (Set its secrets in .env / Railway to enable it.)`);
   }
+
+  // Open the health port first so Railway sees the service as healthy quickly,
+  // independent of how long the Slack Socket Mode connection takes.
+  startHealthServer();
 
   const channelId = env.slackChannelId();
 
