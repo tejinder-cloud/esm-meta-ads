@@ -14,7 +14,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "^0.1.0",
+    "@anthropic-ai/claude-agent-sdk": "0.3.183",
     "@slack/bolt": "^4.2.0",
     "dotenv": "^16.4.5",
     "googleapis": "^144.0.0"
