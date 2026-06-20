@@ -50,6 +50,9 @@ interface Conversation {
 
 const conversations = new Map<string, Conversation>();
 
+/** Call-to-action appended to a freshly proposed plan (not part of the plan body). */
+const PROPOSE_FOOTER = "Reply *approve* to lock this plan in, or *change: …* to tell me what to adjust.";
+
 function renderTranscript(turns: Turn[]): string {
   return turns.map((t) => `${t.who}: ${t.text}`).join("\n\n");
 }
@@ -116,30 +119,34 @@ async function main() {
     if (result.status === "proposed") {
       convo.phase = "proposed";
       convo.lastPlan = result.message;
+      // Append the approve/change call-to-action only on a live proposal.
+      await post(say, threadRoot, `${result.message}\n\n${PROPOSE_FOOTER}`);
     } else {
       convo.phase = "gathering";
+      await post(say, threadRoot, result.message);
     }
-    await post(say, threadRoot, result.message);
   }
 
-  /** Handle the operator's approval of a proposed plan. */
+  /**
+   * Handle a clean approval: post the locked plan as the final record (no
+   * approve/change prompt — it reads as final), then a one-line manager record.
+   */
   async function finalizeApproval(threadRoot: string, userId: string, plan: string, say: SayFn) {
+    let lockedFooter: string;
     if (isSheetsConfigured()) {
       try {
         await saveApprovedPlan(`<@${userId}>`, plan);
-        await post(say, threadRoot, "✅ Media plan approved — saved to the shared Google Sheet (tab: media-plans).");
+        lockedFooter = "\n\n🔒 *This plan is locked and approved.* Saved to the shared Google Sheet (tab: media-plans).";
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
-        await post(say, threadRoot, `✅ Media plan approved.\n⚠️ Saving to Google Sheets failed: ${msg}\nThe approved plan is preserved above in this thread.`);
+        lockedFooter = `\n\n🔒 *This plan is locked and approved.* ⚠️ Saving to Google Sheets failed (${msg}), so this message is the record for now.`;
       }
     } else {
-      await post(
-        say,
-        threadRoot,
-        `📋 *Approved media plan (final)*\n\n${plan}\n\n_Note: persistent storage (Google Sheets) isn't connected yet, so this message is the system of record. Set the Google Sheets secrets to auto-save future plans._`,
-      );
-      await post(say, threadRoot, "✅ Media plan approved");
+      lockedFooter =
+        "\n\n🔒 *This plan is locked and approved.* Persistent storage (Google Sheets) isn't connected yet, so this message is the official record of the approved plan.";
     }
+    await post(say, threadRoot, `📋 *Approved media plan (final)*\n\n${plan}${lockedFooter}`);
+    await post(say, threadRoot, "✅ Media plan approved");
     conversations.delete(threadRoot);
   }
 

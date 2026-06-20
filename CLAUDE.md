@@ -166,3 +166,36 @@ Railway builds from GitHub: it runs `npm run build` (`tsc` → `dist/`) then `np
 
 > Pin and verify the installed `@anthropic-ai/claude-agent-sdk` version before relying on its message
 > shapes. The Agent SDK is constrained to pure text replies (no tools, single turn) in `shared/agent.ts`.
+
+## Media Planner forecast benchmarks (India — education / study-abroad)
+
+The Media Planner does **not** let the model improvise forecast numbers (they used to move
+illogically). The LLM supplies only structured inputs and qualitative copy; the code computes every
+number deterministically from the benchmarks below. These are **assumptions, not guarantees** —
+adjust them in `agents/media-planner/forecast.ts` (the `BENCHMARKS` object) and keep this section in
+sync. All values in ₹.
+
+| Benchmark | low | mid | high |
+|-----------|----:|----:|-----:|
+| CPM (₹ / 1,000 impressions) | 80 | 150 | 250 |
+| Cost per result — leads (CPL) | 250 | 450 | 700 |
+| Cost per result — purchases (CPA) | 900 | 1,800 | 3,200 |
+| Cost per result — traffic (CPC) | 4 | 10 | 22 |
+| Value per result — leads (for ROAS) | 1,200 | 2,500 | 4,500 |
+| Value per result — purchases (for ROAS) | 2,500 | 5,000 | 9,000 |
+
+Frequency (impressions per unique person over the flight), by geo tightness:
+`broad = 1.4`, `medium = 2.0`, `tight = 3.0`. Budget split: test phase = 20% of total over the first
+up-to-7 days, scale phase = the remainder.
+
+**Formulas (all ranges are low–mid–high):**
+- `impressions = budget ÷ CPM × 1000` (low CPM → high impressions)
+- `reach = impressions ÷ frequency` (tighter geo → higher frequency → lower reach)
+- `results = budget ÷ cost-per-result` (lower cost → more results)
+- `cost-per-result` = the benchmark range directly
+- `ROAS = value-per-result ÷ cost-per-result` (efficiency metric; independent of budget). Traffic has
+  no conversion value → ROAS is shown as N/A.
+
+This guarantees the numbers move logically: **lower budget → lower impressions, reach, and results;
+tighter geo → lower reach.** ROAS is the softest figure (depends on the assumed value per result) and
+is labelled as such. Framing in the plan stays "directional, benchmark-based, tightens with real data."

@@ -1,5 +1,15 @@
 import { runAgent } from "../../shared/agent.js";
 import { ensureTab, readRange, appendRows } from "../../shared/google-sheets.js";
+import {
+  computeForecast,
+  computeBudgetSplit,
+  formatForecast,
+  formatBudgetSplit,
+  money,
+  RESULT_LABELS,
+  type Objective,
+  type GeoTightness,
+} from "./forecast.js";
 
 /**
  * Agent 1 — Media Planner.
@@ -26,23 +36,35 @@ REQUIRED INPUTS (you need all of these before proposing a plan):
 
 BEHAVIOR:
 - If any required input is missing or unclear from the conversation so far, set "status" to "need_input" and ask ONLY for the missing ones, in plain, friendly English. Do NOT guess or invent values, and do NOT produce a plan yet.
-- Once you have all inputs, set "status" to "proposed" and produce a complete media plan containing:
-  • A campaign / ad-set structure appropriate to the objective.
-  • A budget split across a small TEST phase and a SCALE phase, each with daily ₹ amounts (and totals).
-  • A forecast of reach, results, cost-per-result, and ROAS — each as a low–mid–high range.
-  • The assumptions you made, stated plainly.
-  • An honest confidence note: early forecasts lean on India/category benchmarks, not this account's own history, so treat them as directional.
-  • End the message by asking the operator to reply "approve" to lock it in, or "change: ..." to revise.
-- If the operator asks for a change, revise the plan and propose again (status "proposed").
+- Once you have all inputs, set "status" to "proposed" and return the STRUCTURED inputs plus a qualitative campaign structure and assumptions (see OUTPUT FORMAT).
 - When revising after a change request, apply ONLY the changes the operator explicitly asked for. Keep everything else exactly as it was. Never introduce changes the operator did not request.
+
+CRITICAL — the system, not you, computes all numbers:
+- Do NOT write any figures for budget split, daily spend, impressions, reach, results/leads, cost-per-result, or ROAS. The system calculates ALL of those deterministically from category benchmarks, so they stay consistent and move logically.
+- "structureMarkdown" must describe the campaign and ad-set structure qualitatively (objective, the test→scale phases conceptually, audiences, creative angles) with NO ₹ amounts and NO forecast numbers.
+- Do NOT add any "approve"/"change" instruction — the system adds that separately.
 
 HARD RULES: You only propose. You never create campaigns, never spend, never launch. You have no tools and take no actions.
 
-OUTPUT FORMAT — IMPORTANT:
-Respond with ONLY a single JSON object and nothing else (no markdown, no code fences). Keys:
-  "status": "need_input" or "proposed"
-  "message": string — the exact text to post to Slack. Write it cleanly and readably; Slack *bold* uses single asterisks. Use newlines for structure.
-  "missing": array of strings — names of the missing inputs when status is "need_input"; otherwise an empty array.`;
+OUTPUT FORMAT — respond with ONLY a single JSON object, no markdown, no code fences.
+For a question:
+  {"status":"need_input","message":"<plain-English ask for ONLY the missing inputs>","missing":["..."]}
+For a proposal:
+  {
+    "status":"proposed",
+    "inputs":{
+      "product":"<short product/service description>",
+      "objective":"leads" | "purchases" | "traffic",
+      "totalBudgetInr": <number; if a range was given, use its midpoint>,
+      "timeframeDays": <number of days>,
+      "targetSummary":"<echo the operator's target, e.g. 'Target CPL ₹400' or 'Target ROAS 3x'>",
+      "landingPage":"<url>",
+      "geoTightness":"broad" | "medium" | "tight"
+    },
+    "structureMarkdown":"<qualitative campaign + ad-set structure; NO ₹ amounts, NO forecast numbers>",
+    "assumptionsMarkdown":"<qualitative assumptions: audiences, creative approach, tracking, what's excluded; do NOT restate budget or forecast numbers>"
+  }
+geoTightness: "broad" = all-India; "medium" = a few states/cities; "tight" = one city/small area. Default "broad" if the operator didn't narrow the geography.`;
 
 export type PlannerStatus = "need_input" | "proposed";
 
@@ -64,41 +86,150 @@ export function stripPlanCommand(text: string): string {
   return text.replace(/^\/plan\b\s*/i, "").trim();
 }
 
-/** Tolerantly parse the agent's JSON reply into a PlannerResult. */
-export function parsePlannerResult(raw: string): PlannerResult {
+/** Extract the first JSON object from a model reply (tolerates code fences). */
+function extractJson(raw: string): Record<string, unknown> | null {
   let body = raw.trim();
   const fenced = body.match(/```(?:json)?\s*([\s\S]*?)```/i);
   if (fenced) body = fenced[1].trim();
-
   const start = body.indexOf("{");
   const end = body.lastIndexOf("}");
-  if (start !== -1 && end > start) {
-    try {
-      const obj = JSON.parse(body.slice(start, end + 1)) as Record<string, unknown>;
-      const status: PlannerStatus = obj.status === "need_input" ? "need_input" : "proposed";
-      const message =
-        typeof obj.message === "string" && obj.message.trim() ? obj.message : raw.trim();
-      const missing = Array.isArray(obj.missing) ? obj.missing.map((m) => String(m)) : [];
-      return { status, message, missing };
-    } catch {
-      /* fall through to fallback */
-    }
+  if (start === -1 || end <= start) return null;
+  try {
+    return JSON.parse(body.slice(start, end + 1)) as Record<string, unknown>;
+  } catch {
+    return null;
   }
-  // Fallback: if the model didn't return clean JSON, treat the whole reply as a proposal.
-  return { status: "proposed", message: raw.trim(), missing: [] };
+}
+
+function coerceObjective(v: unknown): Objective | null {
+  return v === "leads" || v === "purchases" || v === "traffic" ? v : null;
+}
+function coerceGeo(v: unknown): GeoTightness {
+  return v === "medium" || v === "tight" ? v : "broad";
+}
+function toNumber(v: unknown): number {
+  if (typeof v === "number" && Number.isFinite(v)) return v;
+  if (typeof v === "string") {
+    const n = Number(v.replace(/[^0-9.]/g, ""));
+    return Number.isFinite(n) ? n : NaN;
+  }
+  return NaN;
+}
+function asString(v: unknown, fallback = ""): string {
+  return typeof v === "string" && v.trim() ? v.trim() : fallback;
+}
+
+/** Slack mrkdwn uses single-asterisk bold; convert any markdown **bold**. */
+function toSlackMarkdown(s: string): string {
+  return s.replace(/\*\*/g, "*");
+}
+
+/** Assemble the full, deterministic proposal message (no approve/change prompt). */
+function assembleProposal(args: {
+  product: string;
+  objective: Objective;
+  totalBudgetInr: number;
+  timeframeDays: number;
+  targetSummary: string;
+  landingPage: string;
+  geoTightness: GeoTightness;
+  structureMarkdown: string;
+  assumptionsMarkdown: string;
+}): string {
+  const geoLabel =
+    args.geoTightness === "broad"
+      ? "Broad (all-India)"
+      : args.geoTightness === "medium"
+        ? "Medium (a few states/cities)"
+        : "Tight (one city / small area)";
+
+  const split = computeBudgetSplit(args.totalBudgetInr, args.timeframeDays);
+  const forecast = computeForecast({
+    totalBudgetInr: args.totalBudgetInr,
+    timeframeDays: args.timeframeDays,
+    objective: args.objective,
+    geoTightness: args.geoTightness,
+  });
+
+  const parts: (string | null)[] = [
+    `*Media Plan — ${args.product} (${RESULT_LABELS[args.objective].result})*`,
+    "All figures in ₹. Country: India.",
+    "",
+    "*Inputs*",
+    `• Objective: ${args.objective}`,
+    `• Total budget: ${money(args.totalBudgetInr)} over ${args.timeframeDays} days`,
+    args.targetSummary ? `• ${args.targetSummary}` : null,
+    args.landingPage ? `• Landing page: ${args.landingPage}` : null,
+    `• Geo: ${geoLabel}`,
+    "",
+    args.structureMarkdown ? "*Campaign structure*" : null,
+    args.structureMarkdown ? toSlackMarkdown(args.structureMarkdown) : null,
+    args.structureMarkdown ? "" : null,
+    formatBudgetSplit(split, args.totalBudgetInr),
+    "",
+    formatForecast(forecast, args.objective),
+    "",
+    args.assumptionsMarkdown ? "*Assumptions*" : null,
+    args.assumptionsMarkdown ? toSlackMarkdown(args.assumptionsMarkdown) : null,
+    args.assumptionsMarkdown ? "" : null,
+    "_Forecasts are directional and benchmark-based (India education / study-abroad); they tighten as the account gathers real data._",
+  ];
+  return parts.filter((p) => p !== null).join("\n").trim();
 }
 
 /**
  * Run one Media Planner turn over the full conversation transcript.
- * Returns whether it still needs input or has proposed a plan, plus the
- * Slack-ready message to post.
+ * The LLM returns structured inputs + qualitative copy; the code computes every
+ * number (budget split + forecast) deterministically and assembles the message.
+ * Returns whether it still needs input or has proposed a plan.
  */
 export async function runMediaPlanner(transcript: string): Promise<PlannerResult> {
   const raw = await runAgent({
     systemPrompt: MEDIA_PLANNER_SYSTEM_PROMPT,
     prompt: transcript,
   });
-  return parsePlannerResult(raw);
+
+  const obj = extractJson(raw);
+  // Fallback: if the model didn't return parseable JSON, post whatever it said.
+  if (!obj) return { status: "proposed", message: raw.trim(), missing: [] };
+
+  if (obj.status === "need_input") {
+    const message = asString(obj.message, "Could you share a bit more so I can plan this?");
+    const missing = Array.isArray(obj.missing) ? obj.missing.map((m) => String(m)) : [];
+    return { status: "need_input", message, missing };
+  }
+
+  // Proposed → validate the inputs we need to compute a forecast.
+  const inputs = (obj.inputs ?? {}) as Record<string, unknown>;
+  const objective = coerceObjective(inputs.objective);
+  const totalBudgetInr = toNumber(inputs.totalBudgetInr);
+  const timeframeDays = toNumber(inputs.timeframeDays);
+
+  if (!objective || !(totalBudgetInr > 0) || !(timeframeDays > 0)) {
+    const missing: string[] = [];
+    if (!objective) missing.push("objective (leads, purchases, or traffic)");
+    if (!(totalBudgetInr > 0)) missing.push("total budget in ₹");
+    if (!(timeframeDays > 0)) missing.push("timeframe (number of days)");
+    return {
+      status: "need_input",
+      message: `I just need a bit more to run the numbers: ${missing.join(", ")}.`,
+      missing,
+    };
+  }
+
+  const message = assembleProposal({
+    product: asString(inputs.product, "your campaign"),
+    objective,
+    totalBudgetInr,
+    timeframeDays,
+    targetSummary: asString(inputs.targetSummary),
+    landingPage: asString(inputs.landingPage),
+    geoTightness: coerceGeo(inputs.geoTightness),
+    structureMarkdown: asString(obj.structureMarkdown),
+    assumptionsMarkdown: asString(obj.assumptionsMarkdown),
+  });
+
+  return { status: "proposed", message, missing: [] };
 }
 
 // ---------------------------------------------------------------------------
