@@ -10,6 +10,12 @@ import {
   decideOperatorIntent,
   saveApprovedPlan,
 } from "../agents/media-planner/index.js";
+import {
+  ensureApprovalsTab,
+  savePendingApproval,
+  listPendingApprovals,
+  clearPendingApproval,
+} from "../shared/approvals.js";
 
 const { App } = bolt;
 
@@ -55,6 +61,16 @@ const PROPOSE_FOOTER = "Reply *approve* to lock this plan in, or *change: …* t
 
 function renderTranscript(turns: Turn[]): string {
   return turns.map((t) => `${t.who}: ${t.text}`).join("\n\n");
+}
+
+/**
+ * Log (never throw) when a durable approval-store call fails. Durability is
+ * best-effort: a Sheets hiccup must never crash the runtime or block the
+ * operator reply — the in-memory Map keeps the conversation working regardless.
+ */
+function warnStore(action: string, err: unknown): void {
+  const msg = err instanceof Error ? err.message : String(err);
+  console.warn(`⚠️  Approval store ${action} failed (continuing in-memory): ${msg}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -121,6 +137,19 @@ async function main() {
       convo.lastPlan = result.message;
       // Append the approve/change call-to-action only on a live proposal.
       await post(say, threadRoot, `${result.message}\n\n${PROPOSE_FOOTER}`);
+      // Mirror the now-pending approval to the Sheet so it survives a restart.
+      // Done after the reply is posted; failure is logged, never blocks.
+      try {
+        await savePendingApproval({
+          threadRoot,
+          agent: convo.agent,
+          phase: convo.phase,
+          lastPlan: convo.lastPlan,
+          transcript: convo.transcript,
+        });
+      } catch (err) {
+        warnStore("save", err);
+      }
     } else {
       convo.phase = "gathering";
       await post(say, threadRoot, result.message);
@@ -148,6 +177,12 @@ async function main() {
     await post(say, threadRoot, `📋 *Approved media plan (final)*\n\n${plan}${lockedFooter}`);
     await post(say, threadRoot, "✅ Media plan approved");
     conversations.delete(threadRoot);
+    // Conversation complete → drop its durable pending-approval row.
+    try {
+      await clearPendingApproval(threadRoot);
+    } catch (err) {
+      warnStore("clear", err);
+    }
   }
 
   // ----- Central dispatch --------------------------------------------------
@@ -238,6 +273,31 @@ async function main() {
 
   await app.start();
   console.log(`✅ ESM Meta Ads runtime started. Listening on #esm-meta-ads (${channelId}) as ${botUserId}.`);
+
+  // Rehydrate in-flight approvals from the Sheet so a restart mid-approval
+  // doesn't drop a proposed plan still awaiting "approve". Best-effort: a Sheets
+  // failure here logs and continues — the service runs fine without restored state.
+  try {
+    await ensureApprovalsTab();
+    const pending = await listPendingApprovals();
+    for (const rec of pending) {
+      conversations.set(rec.threadRoot, {
+        // Only the Media Planner uses the approval gate today.
+        agent: "media-planner",
+        phase: rec.phase === "proposed" ? "proposed" : "gathering",
+        transcript: rec.transcript.map((t) => ({
+          who: t.who === "Media Planner" ? "Media Planner" : "Operator",
+          text: t.text,
+        })),
+        lastPlan: rec.lastPlan || undefined,
+      });
+    }
+    if (pending.length > 0) {
+      console.log(`♻️  Restored ${pending.length} pending approval(s) from the Sheet.`);
+    }
+  } catch (err) {
+    warnStore("restore", err);
+  }
 }
 
 main().catch((err) => {
