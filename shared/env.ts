@@ -106,6 +106,11 @@ export function optionalFeatureStatus(): { feature: string; missing: string[] }[
   })).filter((g) => g.missing.length > 0);
 }
 
+/** True only when the Meta read credentials (token + ad account) are present. */
+export function isMetaConfigured(): boolean {
+  return ["META_ACCESS_TOKEN", "META_AD_ACCOUNT_ID"].every(isSet);
+}
+
 /** True only when all Google Sheets secrets are present (shared memory configured). */
 export function isSheetsConfigured(): boolean {
   return ["GOOGLE_SHEETS_SPREADSHEET_ID", "GOOGLE_SHEETS_CLIENT_EMAIL", "GOOGLE_SHEETS_PRIVATE_KEY"].every(isSet);
