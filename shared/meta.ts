@@ -26,16 +26,16 @@ export type DatePreset =
   | "last_month";
 
 /**
- * Action types Meta uses to count a "lead". Different setups report leads under
- * different names (instant forms vs. website pixel/CAPI form-fills), so we sum
- * any of these. If lead counts look off vs. Ads Manager, adjust this list.
+ * The single canonical action type for a de-duplicated lead.
+ *
+ * Meta reports the SAME leads under several overlapping action_type names
+ * (`lead`, `offsite_*_add_meta_leads`, etc.), each carrying the identical value,
+ * so summing them double-counts. `onsite_conversion.lead_grouped` is Meta's
+ * grouped on-Facebook Instant-Form lead metric — the de-duplicated total shown
+ * in the Ads Manager "Leads" column. Ads Manager showed 149 leads for last_7d
+ * (verified 2026-06-25), which this single type matches exactly.
  */
-const LEAD_ACTION_TYPES = new Set<string>([
-  "lead",
-  "onsite_conversion.lead_grouped",
-  "offsite_conversion.fb_pixel_lead",
-  "leadgen_grouped",
-]);
+const CANONICAL_LEAD_ACTION_TYPE = "onsite_conversion.lead_grouped";
 
 interface MetaAction {
   action_type: string;
@@ -60,12 +60,11 @@ async function metaGet(path: string, params: Record<string, string>): Promise<an
   return data;
 }
 
-/** Sum all lead-type actions into one number. */
+/** Count leads from the single canonical (de-duplicated) action type only. */
 function sumLeads(actions: MetaAction[] | undefined): number {
   if (!actions) return 0;
-  return actions
-    .filter((a) => LEAD_ACTION_TYPES.has(a.action_type))
-    .reduce((total, a) => total + (Number(a.value) || 0), 0);
+  const row = actions.find((a) => a.action_type === CANONICAL_LEAD_ACTION_TYPE);
+  return row ? Number(row.value) || 0 : 0;
 }
 
 function num(v: unknown): number {
