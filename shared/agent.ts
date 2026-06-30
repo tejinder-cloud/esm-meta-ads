@@ -41,10 +41,14 @@ export async function runAgent({
     options: {
       model: MODEL,
       systemPrompt: `${TEAM_CONTEXT}\n\n${systemPrompt}`,
-      // Keep replies pure text: no tools, single turn, and don't load any
-      // local settings/CLAUDE.md from disk. This is a server, not a coding agent.
+      // Keep replies pure text: no tools and don't load any local
+      // settings/CLAUDE.md from disk. This is a server, not a coding agent.
+      // allowedTools stays [] so the agent can reason but never act (no Meta
+      // writes, no spend). maxTurns only bounds internal reasoning turns: the
+      // model occasionally needs a second turn to finish, and maxTurns: 1 made
+      // the SDK throw "Reached maximum number of turns (1)" on those runs.
       allowedTools: [],
-      maxTurns: 1,
+      maxTurns: 12,
       settingSources: [],
     },
   });
