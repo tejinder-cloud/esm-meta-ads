@@ -1,4 +1,4 @@
-import { runAgent } from "../../shared/agent.js";
+import { runAgent, AGENT_ERROR_REPLY } from "../../shared/agent.js";
 import { ensureTab, readRange, appendRows } from "../../shared/google-sheets.js";
 import {
   computeForecast,
@@ -188,6 +188,14 @@ export async function runMediaPlanner(transcript: string): Promise<PlannerResult
     systemPrompt: MEDIA_PLANNER_SYSTEM_PROMPT,
     prompt: transcript,
   });
+
+  // The Agent SDK errored (max-turns or transport): surface its graceful reply
+  // but stay in the pre-plan state. Returning "need_input" keeps the runtime in
+  // the gathering phase, so nothing is treated as awaiting approval and no row
+  // is written to pending-approvals on an error.
+  if (raw === AGENT_ERROR_REPLY) {
+    return { status: "need_input", message: AGENT_ERROR_REPLY, missing: [] };
+  }
 
   const obj = extractJson(raw);
   // Fallback: if the model didn't return parseable JSON, post whatever it said.
