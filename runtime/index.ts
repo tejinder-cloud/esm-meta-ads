@@ -1,8 +1,9 @@
 import http from "node:http";
 import bolt from "@slack/bolt";
 import type { SayFn } from "@slack/bolt";
-import { env, validateEnv, optionalFeatureStatus, describeEnv, isSheetsConfigured, MissingEnvError } from "../shared/env.js";
+import { env, validateEnv, optionalFeatureStatus, describeEnv, isSheetsConfigured, isMetaConfigured, MissingEnvError } from "../shared/env.js";
 import { runAgent } from "../shared/agent.js";
+import { runDailyReport } from "../agents/analyst/index.js";
 import {
   isMediaPlanRequest,
   stripPlanCommand,
@@ -86,6 +87,33 @@ function startHealthServer(): void {
   server.listen(port, () => {
     console.log(`🩺 Health endpoint listening on :${port} (returns 200 OK).`);
   });
+}
+
+// ---------------------------------------------------------------------------
+// Simple daily scheduler (no extra deps). Fires a job once per day at a fixed
+// UTC time, then reschedules itself for the next day. A self-correcting
+// setTimeout (recomputed each cycle) avoids drift from setInterval.
+// ---------------------------------------------------------------------------
+
+function msUntilNextUtc(hour: number, minute: number, now: Date = new Date()): number {
+  const next = new Date(now);
+  next.setUTCHours(hour, minute, 0, 0);
+  if (next.getTime() <= now.getTime()) next.setUTCDate(next.getUTCDate() + 1);
+  return next.getTime() - now.getTime();
+}
+
+function scheduleDailyUtc(hour: number, minute: number, job: () => Promise<void>): void {
+  const tick = async () => {
+    try {
+      await job();
+    } catch (err) {
+      // Belt-and-suspenders: the job is already wrapped, but never let a
+      // scheduler tick crash the process.
+      console.error("Scheduled job error:", err instanceof Error ? err.message : err);
+    }
+    setTimeout(tick, msUntilNextUtc(hour, minute));
+  };
+  setTimeout(tick, msUntilNextUtc(hour, minute));
 }
 
 function reportMissingSecrets(err: MissingEnvError): never {
@@ -297,6 +325,23 @@ async function main() {
     }
   } catch (err) {
     warnStore("restore", err);
+  }
+
+  // Analyst (Agent 8) — read-only daily report at 02:30 UTC = 08:00 IST.
+  // India is UTC+5:30, so 08:00 IST is 02:30 UTC. runDailyReport is idempotent
+  // (one row per date in "daily-report") and fully self-wrapped, so a restart
+  // near 8 AM can't double-post and a failure can't crash the runtime.
+  if (isMetaConfigured()) {
+    scheduleDailyUtc(2, 30, async () => {
+      await runDailyReport({
+        postMessage: async (text) => {
+          await app.client.chat.postMessage({ channel: channelId, text });
+        },
+      });
+    });
+    console.log("🗓️  Analyst scheduled: daily report at 02:30 UTC (08:00 IST) → #esm-meta-ads + daily-report tab.");
+  } else {
+    console.log("ℹ️  Analyst daily report disabled — Meta is not configured (set META_* to enable).");
   }
 }
 
