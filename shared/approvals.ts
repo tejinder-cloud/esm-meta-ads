@@ -61,6 +61,20 @@ function sheetsReady(): boolean {
 
 // --- Row <-> record conversion ---------------------------------------------
 
+/**
+ * Write approval rows with valueInputOption "RAW" (never "USER_ENTERED").
+ *
+ * Guard against silently reintroducing the numeric-coercion bug: the threadRoot
+ * is a Slack timestamp like "1719761234.123456". Under "USER_ENTERED" Sheets
+ * parses that numeric-looking string into a (lossy) number, and the default
+ * FORMATTED_VALUE read hands back a rounded string — so the restored Map key no
+ * longer equals the live thread and post-restart "approve" misses the planner.
+ * "RAW" stores every field verbatim as text, so threadRoot (and lastPlan /
+ * transcriptJson, which could otherwise start with "=" and become a formula)
+ * round-trip byte-identically. All approvals writes MUST use this constant.
+ */
+const APPROVALS_INPUT_OPTION = "RAW" as const;
+
 function toRow(r: PendingApproval): Row {
   return [r.threadRoot, r.agent, r.phase, r.lastPlan, JSON.stringify(r.transcript), r.updatedAt];
 }
@@ -105,9 +119,9 @@ export async function savePendingApproval(input: PendingApprovalInput): Promise<
   const idx = rows.findIndex((o) => (o.threadRoot ?? "") === input.threadRoot);
   if (idx >= 0) {
     const rowNum = idx + 2; // +1 for the header row, +1 for 1-based indexing
-    await writeRange(`${TAB}!A${rowNum}:F${rowNum}`, [toRow(record)]);
+    await writeRange(`${TAB}!A${rowNum}:F${rowNum}`, [toRow(record)], APPROVALS_INPUT_OPTION);
   } else {
-    await appendRows(TAB, [toRow(record)]);
+    await appendRows(TAB, [toRow(record)], APPROVALS_INPUT_OPTION);
   }
 }
 
@@ -130,6 +144,6 @@ export async function clearPendingApproval(threadRoot: string): Promise<void> {
   // Clear every data row (keep the header), then write the survivors back.
   await clearRange(`${TAB}!A2:F`);
   if (remaining.length > 0) {
-    await writeRange(`${TAB}!A2`, remaining.map(toRow));
+    await writeRange(`${TAB}!A2`, remaining.map(toRow), APPROVALS_INPUT_OPTION);
   }
 }

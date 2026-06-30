@@ -68,15 +68,33 @@ export async function readAsObjects(
 }
 
 /**
+ * How cell values are interpreted on write (Google Sheets `valueInputOption`):
+ *   - "USER_ENTERED": parsed as if typed in the UI — numeric-looking strings
+ *     become numbers, leading "=" becomes a formula. Right for human-readable
+ *     data (e.g. ₹ figures in media-plans).
+ *   - "RAW": stored verbatim as text — no number/formula coercion. Right for
+ *     opaque identifiers that must round-trip byte-identically (e.g. Slack
+ *     thread timestamps like "1719761234.123456").
+ */
+export type ValueInputOption = "USER_ENTERED" | "RAW";
+
+/**
  * Append rows to the bottom of a tab. Use this for log-style writes
  * (e.g. appending a new report or a new line of campaign data).
+ *
+ * `valueInputOption` defaults to "USER_ENTERED"; pass "RAW" when a value must be
+ * preserved exactly (no numeric/formula coercion).
  */
-export async function appendRows(range: string, rows: Row[]): Promise<void> {
+export async function appendRows(
+  range: string,
+  rows: Row[],
+  valueInputOption: ValueInputOption = "USER_ENTERED",
+): Promise<void> {
   const sheets = getSheets();
   await sheets.spreadsheets.values.append({
     spreadsheetId: env.sheetsSpreadsheetId(),
     range,
-    valueInputOption: "USER_ENTERED",
+    valueInputOption,
     insertDataOption: "INSERT_ROWS",
     requestBody: { values: rows },
   });
@@ -85,13 +103,20 @@ export async function appendRows(range: string, rows: Row[]): Promise<void> {
 /**
  * Overwrite a range with the given rows. Use this to (re)write a whole
  * section, e.g. replacing the current media plan.
+ *
+ * `valueInputOption` defaults to "USER_ENTERED"; pass "RAW" when a value must be
+ * preserved exactly (no numeric/formula coercion).
  */
-export async function writeRange(range: string, rows: Row[]): Promise<void> {
+export async function writeRange(
+  range: string,
+  rows: Row[],
+  valueInputOption: ValueInputOption = "USER_ENTERED",
+): Promise<void> {
   const sheets = getSheets();
   await sheets.spreadsheets.values.update({
     spreadsheetId: env.sheetsSpreadsheetId(),
     range,
-    valueInputOption: "USER_ENTERED",
+    valueInputOption,
     requestBody: { values: rows },
   });
 }
