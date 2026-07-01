@@ -145,6 +145,14 @@ export const env = {
 
   // Gemini (image / video generation)
   geminiApiKey: () => required("GEMINI_API_KEY"),
+
+  /**
+   * Optimizer (B3) arming flag. Default FALSE = shadow mode (detect + alert only,
+   * never pauses). "true" arms autonomous auto-pause on the NZ pilot — a
+   * deliberate later step, kept off for now. Any value other than "true"
+   * (case-insensitive) is treated as false so shadow is the safe default.
+   */
+  optimizerArmed: () => optional("OPTIMIZER_ARMED", "false").toLowerCase() === "true",
 } as const;
 
 /** Currency for all monetary values in this system. */

@@ -16,7 +16,8 @@
     "analyst:run": "tsx scripts/analyst-run.ts",
     "quality:check": "tsx scripts/quality-check.ts",
     "writelayer:dryrun": "tsx scripts/writelayer-dryrun.ts",
-    "proof:resolve": "tsx scripts/resolve-pilot.ts"
+    "proof:resolve": "tsx scripts/resolve-pilot.ts",
+    "optimizer:check": "tsx scripts/optimizer-check.ts"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "0.3.183",

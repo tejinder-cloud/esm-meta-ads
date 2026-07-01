@@ -4,6 +4,7 @@ import type { SayFn } from "@slack/bolt";
 import { env, validateEnv, optionalFeatureStatus, describeEnv, isSheetsConfigured, isMetaConfigured, MissingEnvError } from "../shared/env.js";
 import { runAgent } from "../shared/agent.js";
 import { runDailyReport } from "../agents/analyst/index.js";
+import { runOptimizerPass } from "../agents/optimizer/index.js";
 import {
   isMediaPlanRequest,
   stripPlanCommand,
@@ -136,6 +137,24 @@ function scheduleDailyUtc(hour: number, minute: number, job: () => Promise<void>
     setTimeout(tick, msUntilNextUtc(hour, minute));
   };
   setTimeout(tick, msUntilNextUtc(hour, minute));
+}
+
+/**
+ * Run `job` on a fixed interval (same self-rescheduling setTimeout pattern as
+ * scheduleDailyUtc, no drift concerns needed at this cadence). First run fires
+ * one interval after startup. The job is expected to be self-wrapped; this still
+ * guards each tick so a throw can never crash the process.
+ */
+function scheduleEveryMs(intervalMs: number, job: () => Promise<void>): void {
+  const tick = async () => {
+    try {
+      await job();
+    } catch (err) {
+      console.error("Scheduled job error:", err instanceof Error ? err.message : err);
+    }
+    setTimeout(tick, intervalMs);
+  };
+  setTimeout(tick, intervalMs);
 }
 
 function reportMissingSecrets(err: MissingEnvError): never {
@@ -517,6 +536,28 @@ async function main() {
     console.log("🗓️  Analyst scheduled: daily report at 02:30 UTC (08:00 IST) → #esm-meta-ads + daily-report tab.");
   } else {
     console.log("ℹ️  Analyst daily report disabled — Meta is not configured (set META_* to enable).");
+  }
+
+  // Optimizer (Agent 9, B3) — NZ pilot monitor every ~20 min (UTC cadence).
+  // SHADOW by default (OPTIMIZER_ARMED=false): detects breakers and alerts, but
+  // pauses nothing. runOptimizerPass is fully self-wrapped (a failed pass logs and
+  // continues, never writes on error), so the scheduler can call it safely.
+  if (isMetaConfigured()) {
+    const OPTIMIZER_INTERVAL_MS = 20 * 60 * 1000;
+    const armed = env.optimizerArmed(); // false everywhere in B3; arming is a later step.
+    scheduleEveryMs(OPTIMIZER_INTERVAL_MS, async () => {
+      await runOptimizerPass({
+        postMessage: async (text) => {
+          await app.client.chat.postMessage({ channel: channelId, text });
+        },
+        armed,
+      });
+    });
+    console.log(
+      `🛰️  Optimizer scheduled: NZ pilot monitor every 20 min (UTC). Mode: ${armed ? "ARMED (auto-pause)" : "SHADOW (alert only)"}.`,
+    );
+  } else {
+    console.log("ℹ️  Optimizer disabled — Meta is not configured (set META_* to enable).");
   }
 }
 
