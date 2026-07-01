@@ -285,6 +285,8 @@ export interface WriteAction {
   params: Record<string, string>; // write params, e.g. { status: "PAUSED" }
   executed: boolean; // false in dry-run (nothing sent); true only on a live POST
   summary: string; // human-readable one-liner (also console.logged)
+  before: Campaign; // campaign state read just before the action (for before→after logs)
+  response?: unknown; // raw Graph API response — present ONLY on a live (executed) POST
 }
 
 /** Render params like `{ status: 'PAUSED' }` for the printout. */
@@ -334,17 +336,17 @@ async function performWrite(
   if (!execute) {
     const summary = `DRY-RUN — would POST ${path} ${formatParams(params)}  (${change}) — nothing sent.`;
     console.log(summary);
-    return { method: "POST", path, params, executed: false, summary };
+    return { method: "POST", path, params, executed: false, summary, before: current };
   }
 
   // --- LIVE EXECUTION (gated) ---------------------------------------------
-  // Real write path. Deliberately NOT exercised in B1: no caller passes
-  // execute=true. Wired behind the operator approval gate in a later Phase B
-  // step. This is the single point where the account is actually mutated.
-  await metaPost(campaignId, params);
+  // Real write path — the single point where the account is actually mutated.
+  // Only reached with execute=true, which the codebase passes ONLY after an
+  // operator approval through the Slack approval gate (see runtime/writelayer-proof.ts).
+  const response = await metaPost(campaignId, params);
   const summary = `EXECUTED — POST ${path} ${formatParams(params)}  (${change})`;
   console.log(summary);
-  return { method: "POST", path, params, executed: true, summary };
+  return { method: "POST", path, params, executed: true, summary, before: current, response };
 }
 
 /** Would set a campaign's status to PAUSED. Dry-run by default (nothing sent). */

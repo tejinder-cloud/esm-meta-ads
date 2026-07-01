@@ -17,6 +17,16 @@ import {
   listPendingApprovals,
   clearPendingApproval,
 } from "../shared/approvals.js";
+import {
+  resolvePilot,
+  approvalPromptMessage,
+  pausedMessage,
+  resumedMessage,
+  executePause,
+  executeResume,
+  PILOT_DAILY_BUDGET,
+  type ProofContext,
+} from "./writelayer-proof.js";
 
 const { App } = bolt;
 
@@ -40,8 +50,8 @@ This is a general message (not a media-plan request). Acknowledge it briefly in 
 // Conversation state (in-memory, keyed by Slack thread root timestamp).
 // ---------------------------------------------------------------------------
 
-type AgentKind = "media-planner";
-type Phase = "gathering" | "proposed";
+type AgentKind = "media-planner" | "writelayer-proof";
+type Phase = "gathering" | "proposed" | "awaiting-approve" | "awaiting-resume";
 
 interface Turn {
   who: "Operator" | "Media Planner";
@@ -53,6 +63,8 @@ interface Conversation {
   phase: Phase;
   transcript: Turn[];
   lastPlan?: string;
+  /** Set only for the "writelayer-proof" conversation (the pilot being acted on). */
+  proof?: ProofContext;
 }
 
 const conversations = new Map<string, Conversation>();
@@ -62,6 +74,16 @@ const PROPOSE_FOOTER = "Reply *approve* to lock this plan in, or *change: …* t
 
 function renderTranscript(turns: Turn[]): string {
   return turns.map((t) => `${t.who}: ${t.text}`).join("\n\n");
+}
+
+/**
+ * Trigger for the one-off Phase B live-write proof. Deliberately explicit so it
+ * can't fire by accident: an exact "/proof" command or the phrase "live-write
+ * proof". Everything else falls through to the normal (media-planner/manager) routing.
+ */
+function isProofRequest(text: string): boolean {
+  const t = text.trim().toLowerCase();
+  return t === "/proof" || t.startsWith("/proof ") || t.includes("live-write proof") || t.includes("live write proof");
 }
 
 /**
@@ -213,6 +235,128 @@ async function main() {
     }
   }
 
+  // ----- Phase B live-write proof (pause → resume, gated) ------------------
+
+  /** Mirror the proof conversation to the durable store (survives a restart). */
+  async function persistProof(threadRoot: string, convo: Conversation) {
+    try {
+      await savePendingApproval({
+        threadRoot,
+        agent: convo.agent, // "writelayer-proof"
+        phase: convo.phase,
+        // Carry the pilot context through a restart (parsed back on rehydrate).
+        lastPlan: JSON.stringify(convo.proof ?? {}),
+        transcript: [],
+      });
+    } catch (err) {
+      warnStore("save", err);
+    }
+  }
+
+  /** Conversation done → drop in-memory + durable state. */
+  async function endProof(threadRoot: string) {
+    conversations.delete(threadRoot);
+    try {
+      await clearPendingApproval(threadRoot);
+    } catch (err) {
+      warnStore("clear", err);
+    }
+  }
+
+  /** Resolve the pilot and open the approval gate. Stops (no state) if not exactly one match. */
+  async function startProof(threadRoot: string, say: SayFn) {
+    const { match, candidates } = await resolvePilot();
+    if (candidates.length === 0) {
+      await post(say, threadRoot, `No *ACTIVE* "New Zealand" campaign at ₹${PILOT_DAILY_BUDGET}/day was found — nothing to do.`);
+      return;
+    }
+    if (candidates.length > 1) {
+      const list = candidates.map((c) => `• ${c.id} — ${c.name} (${c.status}, ₹${c.dailyBudget}/day)`).join("\n");
+      await post(say, threadRoot, `⚠️ ${candidates.length} campaigns matched — stopping rather than guessing. Tell me which one:\n${list}`);
+      return;
+    }
+    const c = match!;
+    const proof: ProofContext = { campaignId: c.id, campaignName: c.name };
+    const convo: Conversation = { agent: "writelayer-proof", phase: "awaiting-approve", transcript: [], proof };
+    conversations.set(threadRoot, convo);
+    await post(say, threadRoot, approvalPromptMessage(proof));
+    await persistProof(threadRoot, convo);
+  }
+
+  /**
+   * Drive the gated proof. Single pause (on "approve") then single resume (on
+   * "resume"), then stop — no loop. "cancel" ends in a known ACTIVE state. Every
+   * write is wrapped: on failure we report and leave the campaign in a known state.
+   */
+  async function handleProofTurn(convo: Conversation, operatorText: string, threadRoot: string, say: SayFn) {
+    const intent = operatorText.trim().toLowerCase();
+    const proof = convo.proof!;
+
+    if (intent === "cancel") {
+      if (convo.phase === "awaiting-resume") {
+        // Already paused — resume so the campaign is left ACTIVE (the guardrail).
+        try {
+          const action = await executeResume(proof);
+          console.log("Proof resume (on cancel) response:", JSON.stringify(action.response));
+          await post(say, threadRoot, `Cancelled — I resumed *${proof.campaignName}* so it's left *ACTIVE*.`);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          await post(say, threadRoot, `⚠️ Cancelled, but resume failed: ${msg}. *${proof.campaignName}* (${proof.campaignId}) may still be PAUSED — please set it back to ACTIVE in Ads Manager.`);
+        }
+      } else {
+        await post(say, threadRoot, `Cancelled — no writes performed, *${proof.campaignName}* left *ACTIVE*.`);
+      }
+      await endProof(threadRoot);
+      return;
+    }
+
+    if (convo.phase === "awaiting-approve") {
+      if (intent !== "approve") {
+        await post(say, threadRoot, "Reply *approve* to begin the live-write proof (I'll *PAUSE* it), or *cancel*.");
+        return;
+      }
+      try {
+        const action = await executePause(proof); // execute=true — first live write
+        console.log("Proof pause response:", JSON.stringify(action.response));
+        convo.phase = "awaiting-resume";
+        await persistProof(threadRoot, convo);
+        await post(say, threadRoot, `${pausedMessage()}\n\`API response: ${JSON.stringify(action.response)}\``);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        // Pause failed → nothing changed; campaign is still ACTIVE (a known state).
+        await post(say, threadRoot, `⚠️ Pause failed: ${msg}. No change made — *${proof.campaignName}* is still *ACTIVE*. Proof aborted.`);
+        await endProof(threadRoot);
+      }
+      return;
+    }
+
+    if (convo.phase === "awaiting-resume") {
+      if (intent !== "resume") {
+        await post(say, threadRoot, "Reply *resume* to set it back to *ACTIVE*, or *cancel* (I'll still resume so it ends ACTIVE).");
+        return;
+      }
+      try {
+        const action = await executeResume(proof);
+        console.log("Proof resume response:", JSON.stringify(action.response));
+        await post(say, threadRoot, `${resumedMessage()}\n\`API response: ${JSON.stringify(action.response)}\``);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        // Resume failed → campaign left PAUSED. Try once more, then hand off to the operator.
+        await post(say, threadRoot, `⚠️ Resume failed: ${msg}. Retrying once…`);
+        try {
+          const retry = await executeResume(proof);
+          console.log("Proof resume retry response:", JSON.stringify(retry.response));
+          await post(say, threadRoot, `${resumedMessage()} (on retry)`);
+        } catch (err2) {
+          const msg2 = err2 instanceof Error ? err2.message : String(err2);
+          await post(say, threadRoot, `⚠️ Resume still failing: ${msg2}. *${proof.campaignName}* (${proof.campaignId}) is *PAUSED* — please set it back to ACTIVE in Ads Manager.`);
+        }
+      }
+      await endProof(threadRoot);
+      return;
+    }
+  }
+
   // ----- Central dispatch --------------------------------------------------
 
   async function handleTurn(text: string, threadRoot: string, userId: string, say: SayFn) {
@@ -226,6 +370,11 @@ async function main() {
 
     // --- New conversation: route ---
     if (!existing) {
+      // Checked first so the explicit proof trigger can't be swallowed by routing.
+      if (isProofRequest(operatorText)) {
+        await startProof(threadRoot, say);
+        return;
+      }
       if (isMediaPlanRequest(operatorText)) {
         const convo: Conversation = { agent: "media-planner", phase: "gathering", transcript: [] };
         conversations.set(threadRoot, convo);
@@ -234,6 +383,12 @@ async function main() {
         const reply = await runAgent({ systemPrompt: MANAGER_SYSTEM_PROMPT, prompt: operatorText });
         await post(say, threadRoot, reply);
       }
+      return;
+    }
+
+    // --- Continuing the Phase B live-write proof ---
+    if (existing.agent === "writelayer-proof") {
+      await handleProofTurn(existing, operatorText, threadRoot, say);
       return;
     }
 
@@ -309,8 +464,28 @@ async function main() {
     await ensureApprovalsTab();
     const pending = await listPendingApprovals();
     for (const rec of pending) {
+      // Restore an in-flight live-write proof (pilot context lives in lastPlan).
+      if (rec.agent === "writelayer-proof") {
+        let proof: ProofContext | undefined;
+        try {
+          const parsed = JSON.parse(rec.lastPlan || "{}");
+          if (parsed && parsed.campaignId) {
+            proof = { campaignId: String(parsed.campaignId), campaignName: String(parsed.campaignName ?? "") };
+          }
+        } catch {
+          proof = undefined;
+        }
+        if (!proof) continue; // corrupt row → skip rather than act on a guess
+        conversations.set(rec.threadRoot, {
+          agent: "writelayer-proof",
+          phase: rec.phase === "awaiting-resume" ? "awaiting-resume" : "awaiting-approve",
+          transcript: [],
+          proof,
+        });
+        continue;
+      }
       conversations.set(rec.threadRoot, {
-        // Only the Media Planner uses the approval gate today.
+        // Media Planner is the other approval-gated conversation.
         agent: "media-planner",
         phase: rec.phase === "proposed" ? "proposed" : "gathering",
         transcript: rec.transcript.map((t) => ({
