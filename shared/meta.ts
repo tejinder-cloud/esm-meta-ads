@@ -245,3 +245,133 @@ export async function listCampaigns(): Promise<Campaign[]> {
     };
   });
 }
+
+/**
+ * Read ONE campaign's current status + daily budget (₹). Read-only (GET). Used
+ * by the write layer below to make the dry-run printout realistic — it shows the
+ * current value alongside the change each action WOULD make.
+ */
+export async function getCampaign(campaignId: string): Promise<Campaign> {
+  const data = await metaGet(campaignId, { fields: "id,name,status,daily_budget" });
+  const raw = data.daily_budget;
+  return {
+    id: String(data.id ?? campaignId),
+    name: String(data.name ?? ""),
+    status: String(data.status ?? ""),
+    dailyBudget: raw !== undefined && raw !== null ? num(raw) / 100 : null,
+  };
+}
+
+// ===========================================================================
+// WRITE layer (Phase B, step B1) — DRY-RUN BY DEFAULT.
+//
+// Every write function takes `execute: boolean` defaulting to FALSE. In dry-run
+// (the default) it performs NO write: it fetches the campaign's current state
+// (a READ, for a realistic printout), builds the exact request it WOULD POST,
+// console.logs + returns it, and sends nothing that changes the account.
+//
+// The real POST path exists for execute=true, but per the Phase B guardrails
+// live execution is APPROVAL-GATED and is wired in a LATER step. In B1 NOTHING
+// calls any write function with execute=true — the whole account stays untouched.
+//
+// The three actions are deliberately reversible: pause ↔ resume, and a budget
+// change can be set back to its prior ₹ value.
+// ===========================================================================
+
+/** The exact write a function would (dry-run) or did (execute) issue. */
+export interface WriteAction {
+  method: "POST";
+  path: string; // Graph node path, e.g. "/1203..."
+  params: Record<string, string>; // write params, e.g. { status: "PAUSED" }
+  executed: boolean; // false in dry-run (nothing sent); true only on a live POST
+  summary: string; // human-readable one-liner (also console.logged)
+}
+
+/** Render params like `{ status: 'PAUSED' }` for the printout. */
+function formatParams(params: Record<string, string>): string {
+  const inner = Object.entries(params)
+    .map(([k, v]) => `${k}: '${v}'`)
+    .join(", ");
+  return `{ ${inner} }`;
+}
+
+/**
+ * Low-level POST against the Graph API. THIS IS THE ONLY WRITE PATH to Meta.
+ *
+ * Reached ONLY when a write function is called with execute=true. Live execution
+ * is approval-gated (see the Phase B guardrails) and gets wired behind that gate
+ * in a later step; no code in B1 calls a write function with execute=true, so
+ * this never runs in this step.
+ */
+async function metaPost(path: string, params: Record<string, string>): Promise<any> {
+  const url = new URL(`${GRAPH}/${path}`);
+  const body = new URLSearchParams({ ...params, access_token: env.metaAccessToken() });
+  const res = await fetch(url, { method: "POST", body });
+  const data = (await res.json()) as any;
+  if (!res.ok || data?.error) {
+    const message = data?.error?.message ?? `HTTP ${res.status}`;
+    throw new Error(`Meta API write error: ${message}`);
+  }
+  return data;
+}
+
+/**
+ * Core of every write action. Reads current state (dry-run safe), then either
+ * prints the intended request (execute=false) or performs the single live POST
+ * (execute=true — gated, not used in B1).
+ */
+async function performWrite(
+  campaignId: string,
+  params: Record<string, string>,
+  describeChange: (current: Campaign) => string,
+  execute: boolean,
+): Promise<WriteAction> {
+  // READ current state — the only network call in dry-run. Never a write.
+  const current = await getCampaign(campaignId);
+  const path = `/${campaignId}`;
+  const change = describeChange(current);
+
+  if (!execute) {
+    const summary = `DRY-RUN — would POST ${path} ${formatParams(params)}  (${change}) — nothing sent.`;
+    console.log(summary);
+    return { method: "POST", path, params, executed: false, summary };
+  }
+
+  // --- LIVE EXECUTION (gated) ---------------------------------------------
+  // Real write path. Deliberately NOT exercised in B1: no caller passes
+  // execute=true. Wired behind the operator approval gate in a later Phase B
+  // step. This is the single point where the account is actually mutated.
+  await metaPost(campaignId, params);
+  const summary = `EXECUTED — POST ${path} ${formatParams(params)}  (${change})`;
+  console.log(summary);
+  return { method: "POST", path, params, executed: true, summary };
+}
+
+/** Would set a campaign's status to PAUSED. Dry-run by default (nothing sent). */
+export function pauseCampaign(campaignId: string, execute = false): Promise<WriteAction> {
+  return performWrite(campaignId, { status: "PAUSED" }, (c) => `status ${c.status} → PAUSED`, execute);
+}
+
+/** Would set a campaign's status to ACTIVE. Dry-run by default (nothing sent). */
+export function resumeCampaign(campaignId: string, execute = false): Promise<WriteAction> {
+  return performWrite(campaignId, { status: "ACTIVE" }, (c) => `status ${c.status} → ACTIVE`, execute);
+}
+
+/**
+ * Would set a campaign's daily budget. Meta stores budgets in paise, so rupees
+ * are converted ₹×100. Dry-run by default (nothing sent).
+ */
+export function setCampaignDailyBudget(
+  campaignId: string,
+  rupees: number,
+  execute = false,
+): Promise<WriteAction> {
+  const paise = Math.round(rupees * 100);
+  return performWrite(
+    campaignId,
+    { daily_budget: String(paise) },
+    (c) =>
+      `daily budget ${c.dailyBudget == null ? "(ad-set level)" : "₹" + c.dailyBudget} → ₹${rupees} (${paise} paise)`,
+    execute,
+  );
+}
