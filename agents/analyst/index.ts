@@ -7,6 +7,7 @@ import {
 } from "../../shared/meta.js";
 import { ensureTab, readRange, readAsObjects, appendRows } from "../../shared/google-sheets.js";
 import { isSheetsConfigured } from "../../shared/env.js";
+import { runQualityReport } from "../tracking-data/index.js";
 
 /**
  * Agent 8 — Analyst (Phase A: read-only daily reporter).
@@ -105,6 +106,7 @@ function buildDigest(
   acct7: AccountInsights,
   movers: CampaignInsight[],
   summary: string | null,
+  qualityLine: string | null,
 ): string {
   const headline =
     acctY.leads > 0
@@ -123,6 +125,9 @@ function buildDigest(
     `• Impressions: ${intStr(acctY.impressions)}`,
     `• Clicks: ${intStr(acctY.clicks)} (CTR ${acctY.ctr.toFixed(2)}%)`,
     contextLine(acctY, acct7),
+    // Tracking & Data agent's trailing-30-day quality line (from the Purchase/
+    // qualified CAPI signal). Omitted only if the quality read is unavailable.
+    qualityLine,
     "",
     moversBlock(movers),
   ];
@@ -249,7 +254,13 @@ export async function runDailyReport(opts: RunDailyReportOptions): Promise<RunDa
 
     const movers = camps.filter((c) => c.spend > 0).sort((a, b) => b.spend - a.spend);
     const summary = await summaryLine(acctY, acct7, movers);
-    const message = buildDigest(dateKey, acctY, acct7, movers, summary);
+
+    // Tracking & Data agent: trailing-30-day quality line + its own quality-report
+    // row. Self-wrapped (never throws), so a quality failure can't break the
+    // digest — worst case it returns the "signal not detected" fallback line.
+    const quality = await runQualityReport(dateKey);
+
+    const message = buildDigest(dateKey, acctY, acct7, movers, summary, quality.line);
 
     await postMessage(message);
 
