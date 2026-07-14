@@ -4,7 +4,7 @@ import type { SayFn } from "@slack/bolt";
 import { env, validateEnv, optionalFeatureStatus, describeEnv, isSheetsConfigured, isMetaConfigured, MissingEnvError } from "../shared/env.js";
 import { runAgent } from "../shared/agent.js";
 import { runDailyReport } from "../agents/analyst/index.js";
-import { runOptimizerPass } from "../agents/optimizer/index.js";
+import { runOptimizerPass, PILOT_ID } from "../agents/optimizer/index.js";
 import {
   isMediaPlanRequest,
   stripPlanCommand,
@@ -157,6 +157,24 @@ function scheduleEveryMs(intervalMs: number, job: () => Promise<void>): void {
   setTimeout(tick, intervalMs);
 }
 
+/**
+ * Unmistakable boot banner announcing the LIVE Optimizer arm state, read fresh
+ * from OPTIMIZER_ARMED at startup. Printed every boot so the armed/shadow mode is
+ * verifiable at a glance in Railway logs. This only REPORTS state — it changes no
+ * breaker logic or thresholds.
+ */
+function logOptimizerBanner(armed: boolean): void {
+  const line =
+    "════════════════════════════════════════════════════════════════════";
+  const body = armed
+    ? `🔴 OPTIMIZER ARMED — will AUTO-PAUSE NZ pilot (${PILOT_ID}) on: zero-lead bleed ` +
+      `(≥₹500 & 0 leads) or CPL runaway (≥₹750 & CPL>₹400). CPQL >₹8,600 = alert only.`
+    : `🟡 OPTIMIZER SHADOW — detects & alerts only, pauses nothing.`;
+  console.log(line);
+  console.log(body);
+  console.log(line);
+}
+
 function reportMissingSecrets(err: MissingEnvError): never {
   console.error("\n❌  Cannot start the ESM Meta Ads runtime — required secret(s) are not set:\n");
   for (const name of err.missing) {
@@ -171,6 +189,10 @@ function reportMissingSecrets(err: MissingEnvError): never {
 
 async function main() {
   validateEnv();
+
+  // Boot banner: announce the live Optimizer arm state (read from OPTIMIZER_ARMED)
+  // before anything else, so armed/shadow is confirmable in Railway logs every boot.
+  logOptimizerBanner(env.optimizerArmed());
 
   for (const { feature } of optionalFeatureStatus()) {
     console.log(`ℹ️  ${feature} is not yet configured — that feature is unavailable for now. (Set its secrets in .env / Railway to enable it.)`);
